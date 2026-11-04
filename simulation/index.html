@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDN Loss Recovery Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: network-ops console. Topology and controls on top, evidence (chart, flow tables, log) below, viva notes last. */
+:root{
+  --bg:#0a1219; --panel:#111c26; --panel2:#0d1720; --line:#223340;
+  --text:#dce7ef; --muted:#8ca2b3;
+  --primary:#4cc3ff; --backup:#b79cff;
+  --good:#46d39a; --warn:#f2b84b; --bad:#ff6b6b;
+  --font:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.45}
+.wrap{max-width:1240px;margin:0 auto;padding:16px}
+header{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:flex-end;justify-content:space-between;margin-bottom:14px}
+h1{margin:0;font-size:22px;font-weight:600;text-wrap:balance}
+.sub{margin:4px 0 0;color:var(--muted);font-size:13px;max-width:70ch}
+.pills{display:flex;flex-wrap:wrap;gap:8px}
+.pill{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:5px 11px;font-family:var(--mono);font-size:12px;white-space:nowrap}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+.pill.primary i{background:var(--primary)} .pill.primary{border-color:#2b6a8c}
+.pill.backup i{background:var(--backup)} .pill.backup{border-color:#6a5a9c}
+.pill.ok i{background:var(--good)} .pill.warn i{background:var(--warn)} .pill.bad i{background:var(--bad)}
+.grid{display:grid;gap:14px;grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);margin-bottom:14px}
+.col{display:flex;flex-direction:column;gap:14px;min-width:0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+.panel h2{margin:0 0 10px;font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+svg{display:block;width:100%;height:auto}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:8px;color:var(--muted);font-size:12px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend b{display:inline-block;width:18px;height:0;border-top:3px solid var(--primary)}
+.legend b.bk{border-color:var(--backup)} .legend b.dn{border-top:3px dashed var(--bad)} .legend b.ls{border-color:var(--warn)}
+.legend u{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--primary)} .legend u.lost{background:var(--bad)}
+/* topology */
+.lk{stroke:#2a3d4c;stroke-width:3;fill:none;stroke-linecap:round}
+.lk.on{stroke:var(--primary);stroke-width:4}
+.lk.on.bk{stroke:var(--backup)}
+.lk.lossy{stroke:var(--warn)}
+.lk.down{stroke:var(--bad);stroke-dasharray:7 6;stroke-width:3}
+.nd rect{fill:var(--panel2);stroke:#35505f;stroke-width:1.5}
+.nd text{fill:var(--text);font-family:var(--mono);font-size:13px;font-weight:500}
+.nd.ctrl rect{stroke:var(--primary)} .nd.host rect{stroke:#4a6577}
+.nt{fill:var(--muted);font-family:var(--mono);font-size:10.5px}
+.pt{fill:#6f879a;font-family:var(--mono);font-size:9.5px}
+.tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em}
+.ctl{stroke:#2f4a5c;stroke-width:1.5;stroke-dasharray:5 5;fill:none}
+.ctl.pulse{stroke:var(--primary);animation:dash .5s linear 4}
+@keyframes dash{to{stroke-dashoffset:-20}}
+.flabel{font-family:var(--mono);font-size:12px;font-weight:500}
+/* controls */
+.btns{display:flex;flex-wrap:wrap;gap:8px}
+.btn{font:500 13px var(--font);color:var(--text);background:#172633;border:1px solid #2c4254;border-radius:7px;padding:8px 12px;cursor:pointer}
+.btn:hover:not(:disabled){background:#1d3243;border-color:#3f6078}
+.btn:disabled{opacity:.38;cursor:not-allowed}
+.btn:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.btn.bad{border-color:#7a3a3f} .btn.bad:hover:not(:disabled){background:#2a1a1f;border-color:var(--bad)}
+.btn.warn{border-color:#7a6230} .btn.warn:hover:not(:disabled){background:#2a2416;border-color:var(--warn)}
+.grp{margin-bottom:12px}
+.grp:last-child{margin-bottom:0}
+.grp label,.grp .lbl{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+select{font:500 13px var(--font);color:var(--text);background:#172633;border:1px solid #2c4254;border-radius:7px;padding:7px 9px}
+.hint{color:var(--muted);font-size:12px;margin:10px 0 0}
+/* tiles */
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.tile{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 10px;min-width:0}
+.tile .v{font-family:var(--mono);font-size:20px;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tile .l{color:var(--muted);font-size:11px}
+.tile .v.bad{color:var(--bad)} .tile .v.ok{color:var(--good)} .tile .v.warn{color:var(--warn)}
+.tile .v.sm{font-size:15px;line-height:30px}
+/* chart */
+.ax{fill:var(--muted);font-family:var(--mono);font-size:10px}
+.gl{stroke:#1b2a36;stroke-width:1}
+.th{stroke:var(--warn);stroke-width:1.2;stroke-dasharray:4 4}
+.thl{fill:var(--warn);font-family:var(--mono);font-size:10px}
+.bar.ok{fill:var(--good)} .bar.warn{fill:var(--warn)} .bar.bad{fill:var(--bad)}
+.rr{stroke:var(--backup);stroke-width:1.5;stroke-dasharray:3 3}
+.rrl{fill:var(--backup);font-family:var(--mono);font-size:10px}
+/* flow tables */
+.ft{margin-bottom:10px}.ft:last-child{margin-bottom:0}
+.ftn{font-family:var(--mono);font-size:12px;font-weight:500;margin-bottom:3px}
+.ftn span{color:var(--muted);font-weight:400}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+th{color:var(--muted);font-weight:400;text-align:left;padding:2px 6px;border-bottom:1px solid var(--line)}
+td{padding:3px 6px;border-bottom:1px solid #182530;white-space:nowrap}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.flash td{background:rgba(183,156,255,.22)}
+tr td{transition:background .8s}
+/* log */
+.log{height:300px;overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-family:var(--mono);font-size:11.5px}
+.ln{display:grid;grid-template-columns:54px 78px 1fr;gap:8px;padding:1px 0}
+.ln .t{color:var(--muted);font-variant-numeric:tabular-nums}
+.ln .s{font-weight:500}
+.s.you{color:#c9d6df}.s.switch{color:var(--warn)}.s.receiver{color:var(--good)}.s.controller{color:var(--primary)}
+.ln .m{color:#c3d2dd;overflow-wrap:anywhere}
+.ln.key .m{color:#fff;font-weight:500}
+/* notes */
+details{border-top:1px solid var(--line);padding:8px 0}
+details:first-of-type{border-top:0;padding-top:0}
+summary{cursor:pointer;font-weight:500;padding:2px 0}
+details p,details ol,details ul{margin:6px 0 2px;color:#b9c9d5;font-size:13px}
+details ol,details ul{padding-left:20px}
+code{font-family:var(--mono);font-size:12px;background:#172633;border-radius:4px;padding:1px 5px}
+@media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:420px){.wrap{padding:16px}.ln{grid-template-columns:48px 1fr}.ln .s{display:none}}
+@media (prefers-reduced-motion:reduce){.ctl.pulse{animation:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Packet Loss Detection &amp; Recovery using SDN</h1>
+      <p class="sub">Team 8 · Section A · Project 7. A browser model of the Mininet + OS-Ken system: a UDP sender numbers packets, the receiver finds gaps, the controller moves traffic to the backup path.</p>
+    </div>
+    <div class="pills">
+      <span class="pill primary" id="pathPill"><i></i><span>Primary path</span></span>
+      <span class="pill ok" id="linkPill"><i></i><span>s1–s2 up</span></span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="panel" aria-label="Network topology">
+      <h2>Network</h2>
+      <svg id="topo" viewBox="0 0 770 372" role="img" aria-label="Topology with hosts h1 and h2, switches s1 to s4 and the controller"></svg>
+      <div class="legend">
+        <span><b></b>primary path</span><span><b class="bk"></b>backup path</span><span><b class="ls"></b>lossy link</span><span><b class="dn"></b>link down</span>
+        <span><u></u>packet in flight</span><span><u class="lost"></u>packet lost</span>
+      </div>
+    </section>
+
+    <div class="col">
+      <section class="panel" aria-label="Controls">
+        <h2>Controls</h2>
+        <div class="grp">
+          <span class="lbl">Fault on primary link s1–s2</span>
+          <div class="btns">
+            <button class="btn bad" id="bBreak">Break link</button>
+            <button class="btn" id="bRestore">Restore link</button>
+            <button class="btn warn" id="bLoss">Inject 30% loss</button>
+            <button class="btn" id="bClear">Remove loss</button>
+          </div>
+        </div>
+        <div class="grp">
+          <span class="lbl">Simulation</span>
+          <div class="row">
+            <button class="btn" id="bPause">Pause</button>
+            <button class="btn" id="bReset">Reset everything</button>
+            <label for="selThr" style="margin:0;display:inline">Alert above
+              <select id="selThr"><option>5</option><option selected>10</option><option>20</option></select> %
+            </label>
+            <label for="selSpd" style="margin:0;display:inline">Speed
+              <select id="selSpd"><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select>
+            </label>
+          </div>
+        </div>
+        <p class="hint">Try: Break link, watch the reroute, then Reset and try Inject 30% loss. The controller never fails back to the primary path.</p>
+      </section>
+
+      <section class="panel" aria-label="Live statistics">
+        <h2>Live statistics</h2>
+        <div class="tiles">
+          <div class="tile"><div class="v" id="tSent">0</div><div class="l">packets sent</div></div>
+          <div class="tile"><div class="v" id="tRecv">0</div><div class="l">received</div></div>
+          <div class="tile"><div class="v" id="tLost">0</div><div class="l">lost (gaps found)</div></div>
+          <div class="tile"><div class="v" id="tOver">0.0%</div><div class="l">overall loss</div></div>
+          <div class="tile"><div class="v" id="tWin">0.0%</div><div class="l">last window</div></div>
+          <div class="tile"><div class="v" id="tRer">0</div><div class="l">reroutes</div></div>
+          <div class="tile"><div class="v" id="tFail">none</div><div class="l">fault to reroute</div></div>
+          <div class="tile"><div class="v sm" id="tRx">receiving</div><div class="l">receiver</div></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="grid">
+    <section class="panel" aria-label="Loss per window">
+      <h2>Loss per 50-packet window</h2>
+      <svg id="chart" viewBox="0 0 600 200" role="img" aria-label="Bar chart of loss percentage per window"></svg>
+    </section>
+    <section class="panel" aria-label="Flow tables">
+      <h2>Flow tables (ovs-ofctl dump-flows)</h2>
+      <div id="flows"></div>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="panel" aria-label="Event log">
+      <h2>Event log</h2>
+      <div class="log" id="log" role="log"></div>
+    </section>
+    <section class="panel" aria-label="Viva notes">
+      <h2>How it works</h2>
+      <details open>
+        <summary>The five steps</summary>
+        <ol>
+          <li><code>sender.py</code> sends UDP packets <code>seq,timestamp</code> from h1 to h2.</li>
+          <li>Switches only follow flow rules: s1 sends h1 traffic out <code>s1-eth2</code> (via s2) until told otherwise.</li>
+          <li><code>receiver.py</code> keeps the next expected number. A bigger number than expected means the numbers in between are lost.</li>
+          <li>Every 50 sequence numbers it works out loss %. Above the threshold it alerts the controller.</li>
+          <li>The controller rewrites two rules: s1 <code>eth1→eth3</code> and s4 <code>eth3→eth2</code>. Traffic now uses s3.</li>
+        </ol>
+      </details>
+      <details>
+        <summary>Two ways the controller finds out</summary>
+        <p>Link failure: the switch sends an OpenFlow PortStatus message (LINK_DOWN) and the controller reacts. Packet loss on a link that is still up: only the application can see it, so the receiver writes an alert file that the controller checks every second.</p>
+      </details>
+      <details>
+        <summary>Why UDP, not TCP?</summary>
+        <p>UDP has no acknowledgements or retransmission, so lost packets stay lost and the application can count them. TCP would resend them and hide the loss.</p>
+      </details>
+      <details>
+        <summary>Why fixed port rules and no flooding?</summary>
+        <p>The topology has a loop (s1, s2, s4, s3). Flooding would circle forever and cause a broadcast storm. The controller installs rules ahead of time (proactive), so no packet waits for the controller (reactive PacketIn).</p>
+      </details>
+      <details>
+        <summary>Why does the receiver go quiet before it reports loss?</summary>
+        <p>A gap is only known when a higher sequence number arrives. While the link is down nothing arrives, so the loss shows up after the first packet on the new path.</p>
+      </details>
+      <details>
+        <summary>Limitations</summary>
+        <ul>
+          <li>No failback: after rerouting, traffic stays on the backup path.</li>
+          <li>One backup path and a fixed topology.</li>
+          <li>The alert goes through a file, so the controller reacts up to a second later.</li>
+          <li>The loss threshold avoids rerouting on one or two random drops.</li>
+        </ul>
+      </details>
+    </section>
+  </div>
+</div>
+
+<script>
+(function(){
+'use strict';
+var HOP=150, SEND=20, WIN=50, THR=10, speed=1, paused=false;
+var N={c0:[400,42],h1:[48,236],s1:[215,236],s2:[400,150],s3:[400,322],s4:[585,236],h2:[722,236]};
+var LINKS={h1s1:['h1','s1'],s1s2:['s1','s2'],s2s4:['s2','s4'],s1s3:['s1','s3'],s3s4:['s3','s4'],s4h2:['s4','h2']};
+var S={};
+function $(id){return document.getElementById(id);}
+function esc(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function init(){
+  S.t=0;S.seq=0;S.acc=0;S.path='primary';S.down=false;S.loss=0;S.faultAt=null;
+  S.sent=0;S.recv=0;S.lost=0;S.expected=0;S.winStart=0;S.winRecv=0;S.alerted=false;
+  S.windows=[];S.reroutes=[];S.failover=null;S.lastRecv=0;
+  S.cnt={s1:0,s2:0,s3:0,s4p:0,s4b:0};
+  S.since={s1:0,s4:0};S.flash={s1:0,s4:0};
+  S.pkts=[];S.timers=[];S.logs=[];
+  S.dirtyLog=true;S.dirtyChart=true;
+  $('pk').innerHTML='';
+}
+
+/* ---------- topology drawing ---------- */
+function portLabel(a,b,text,frac){
+  var A=N[a],B=N[b],dx=B[0]-A[0],dy=B[1]-A[1],len=Math.sqrt(dx*dx+dy*dy);
+  var x=A[0]+dx*frac,y=A[1]+dy*frac,nx=-dy/len*10,ny=dx/len*10;
+  return '<text class="pt" x="'+(x+nx).toFixed(1)+'" y="'+(y+ny+3).toFixed(1)+'" text-anchor="middle">'+text+'</text>';
+}
+function nodeSvg(id,label,w,h,cls){
+  var p=N[id];
+  return '<g class="nd '+cls+'"><rect x="'+(p[0]-w/2)+'" y="'+(p[1]-h/2)+'" width="'+w+'" height="'+h+'" rx="8"/><text x="'+p[0]+'" y="'+(p[1]+4.5)+'" text-anchor="middle">'+label+'</text></g>';
+}
+function buildTopo(){
+  var s='';
+  s+='<path class="ctl" id="ctlA" d="M370 59 L228 218"/><path class="ctl" id="ctlB" d="M430 59 L572 218"/>';
+  s+='<path class="ctl" id="alertArc" d="M722 217 C722 70 600 42 487 42"/>';
+  s+='<text class="pt" x="276" y="112" text-anchor="end">OpenFlow 1.3 (FlowMod)</text>';
+  s+='<text class="pt" x="640" y="64" text-anchor="middle">loss alert</text>';
+  Object.keys(LINKS).forEach(function(k){
+    var a=N[LINKS[k][0]],b=N[LINKS[k][1]];
+    s+='<line class="lk" id="lk_'+k+'" x1="'+a[0]+'" y1="'+a[1]+'" x2="'+b[0]+'" y2="'+b[1]+'"/>';
+  });
+  s+=portLabel('h1','s1','',0.8)+portLabel('s1','h1','eth1',0.3);
+  s+=portLabel('s1','s2','eth2',0.27)+portLabel('s2','s1','eth1',0.27);
+  s+=portLabel('s1','s3','eth3',0.27)+portLabel('s3','s1','eth1',0.27);
+  s+=portLabel('s2','s4','eth2',0.27)+portLabel('s4','s2','eth1',0.27);
+  s+=portLabel('s3','s4','eth2',0.27)+portLabel('s4','s3','eth2',0.27);
+  s+=portLabel('s4','h2','eth3',0.36);
+  s+=nodeSvg('c0','OS-Ken controller',172,34,'ctrl');
+  s+=nodeSvg('h1','h1',58,34,'host')+nodeSvg('h2','h2',58,34,'host');
+  s+=nodeSvg('s1','s1',56,36,'')+nodeSvg('s2','s2',56,36,'')+nodeSvg('s3','s3',56,36,'')+nodeSvg('s4','s4',56,36,'');
+  s+='<text class="nt" x="48" y="270" text-anchor="middle">UDP sender</text><text class="nt" x="48" y="283" text-anchor="middle">10.0.0.1</text>';
+  s+='<text class="nt" x="722" y="270" text-anchor="middle">UDP receiver</text><text class="nt" x="722" y="283" text-anchor="middle">10.0.0.2</text>';
+  s+='<text class="tag" id="tagP" x="400" y="122" text-anchor="middle" fill="#4cc3ff">PRIMARY</text>';
+  s+='<text class="tag" id="tagB" x="400" y="358" text-anchor="middle" fill="#8ca2b3">BACKUP</text>';
+  s+='<text class="flabel" id="lkLabel" x="300" y="176" text-anchor="end" fill="#ff6b6b"></text>';
+  s+='<g id="pk"></g>';
+  $('topo').innerHTML=s;
+}
+function updateTopo(){
+  var prim=S.path==='primary';
+  var on={h1s1:1,s4h2:1,s1s2:prim,s2s4:prim,s1s3:!prim,s3s4:!prim};
+  Object.keys(LINKS).forEach(function(k){
+    var el=$('lk_'+k),c='lk';
+    if(on[k]){c+=' on';if(!prim&&(k==='s1s3'||k==='s3s4'))c+=' bk';}
+    if(k==='s1s2'){if(S.down)c+=' down';else if(S.loss>0)c+=' lossy';}
+    el.setAttribute('class',c);
+  });
+  $('tagP').setAttribute('fill',prim?'#4cc3ff':'#8ca2b3');
+  $('tagB').setAttribute('fill',prim?'#8ca2b3':'#b79cff');
+  var lab=$('lkLabel');
+  lab.textContent=S.down?'link down':(S.loss>0?Math.round(S.loss*100)+'% loss':'');
+  lab.setAttribute('fill',S.down?'#ff6b6b':'#f2b84b');
+  var pp=$('pathPill');
+  pp.className='pill '+(prim?'primary':'backup');
+  pp.lastChild.textContent=prim?'Primary path s1 → s2 → s4':'Backup path s1 → s3 → s4';
+  var lp=$('linkPill');
+  lp.className='pill '+(S.down?'bad':(S.loss>0?'warn':'ok'));
+  lp.lastChild.textContent=S.down?'s1–s2 DOWN':(S.loss>0?'s1–s2 '+Math.round(S.loss*100)+'% loss':'s1–s2 up');
+  $('bBreak').disabled=S.down;$('bRestore').disabled=!S.down;
+  $('bLoss').disabled=S.loss>0;$('bClear').disabled=S.loss===0;
+}
+function pulse(id){
+  var el=$(id);if(!el)return;
+  el.classList.add('pulse');
+  setTimeout(function(){el.classList.remove('pulse');},2200);
+}
+
+/* ---------- log ---------- */
+function log(src,msg,key){
+  S.logs.push({t:S.t,src:src,msg:msg,key:!!key});
+  if(S.logs.length>400)S.logs.shift();
+  S.dirtyLog=true;
+}
+function renderLog(){
+  if(!S.dirtyLog)return;S.dirtyLog=false;
+  var out='',from=Math.max(0,S.logs.length-90);
+  for(var i=S.logs.length-1;i>=from;i--){
+    var l=S.logs[i];
+    out+='<div class="ln'+(l.key?' key':'')+'"><span class="t">'+(l.t/1000).toFixed(2)+'s</span><span class="s '+l.src+'">'+l.src.toUpperCase()+'</span><span class="m">'+esc(l.msg)+'</span></div>';
+  }
+  $('log').innerHTML=out;
+}
+
+/* ---------- simulation ---------- */
+function at(delay,fn){S.timers.push({at:S.t+delay,fn:fn});}
+
+function reroute(reason){
+  S.path='backup';
+  S.since.s1=S.t;S.since.s4=S.t;
+  var now=performance.now();S.flash.s1=now;S.flash.s4=now;
+  S.reroutes.push({t:S.t,win:S.windows.length});
+  if(S.faultAt!==null&&S.failover===null)S.failover=S.t-S.faultAt;
+  log('controller','FlowMod s1: in_port=s1-eth1 now output:s1-eth3');
+  log('controller','FlowMod s4: in_port=s4-eth3 now output:s4-eth2');
+  log('controller','REROUTE ('+reason+'): traffic moved to backup path s1-s3-s4',true);
+  S.dirtyChart=true;updateTopo();
+  pulse('ctlA');pulse('ctlB');
+}
+
+function closeWindow(){
+  var a=S.winStart,b=a+WIN-1,rate=(WIN-S.winRecv)/WIN*100;
+  S.windows.push({a:a,b:b,loss:rate});
+  log('receiver','window '+a+'-'+b+': received '+S.winRecv+'/'+WIN+', loss '+rate.toFixed(1)+'%');
+  if(rate>THR&&!S.alerted){
+    S.alerted=true;
+    var r=rate.toFixed(1);
+    log('receiver','loss '+r+'% is above '+THR+'%, alert written to /tmp/loss_alert',true);
+    pulse('alertArc');
+    at(500,function(){
+      log('controller','loss alert file found');
+      if(S.path==='primary')reroute('receiver reported '+r+'% loss');
+      else log('controller','already on the backup path, nothing to do');
+    });
+  }
+  S.winStart+=WIN;S.winRecv=0;S.dirtyChart=true;
+}
+function receive(seq){
+  S.lastRecv=S.t;
+  if(seq>S.expected){
+    var gap=seq-S.expected;S.lost+=gap;
+    log('receiver',gap===1?'LOSS: missing seq '+S.expected:'LOSS: missing seq '+S.expected+' to '+(seq-1));
+  }
+  if(seq>=S.expected)S.expected=seq+1;
+  while(seq>=S.winStart+WIN)closeWindow();
+  S.recv++;S.winRecv++;
+}
+
+function stepPkt(pk,dt){
+  pk.age+=dt;
+  if(pk.dead!==null){if(pk.age-pk.dead>350)pk.done=true;return;}
+  if(pk.stage===0&&pk.age>=HOP){
+    S.cnt.s1++;
+    var prim=S.path==='primary';
+    pk.br=prim?'p':'b';pk.stage=1;
+    if(prim){
+      if(S.down)pk.dropAt=HOP;
+      else if(S.loss>0&&Math.random()<S.loss)pk.dropAt=HOP+HOP*(0.3+0.45*Math.random());
+    }
+  }
+  if(pk.dropAt!==null&&pk.age>=pk.dropAt){pk.dead=pk.dropAt;return;}
+  if(pk.stage===1&&pk.age>=2*HOP){if(pk.br==='p')S.cnt.s2++;else S.cnt.s3++;pk.stage=2;}
+  if(pk.stage===2&&pk.age>=3*HOP){if(pk.br==='p')S.cnt.s4p++;else S.cnt.s4b++;pk.stage=3;}
+  if(pk.stage===3&&pk.age>=4*HOP){receive(pk.seq);pk.done=true;}
+}
+
+function step(dt){
+  S.t+=dt;S.acc+=dt;
+  while(S.acc>=SEND){
+    S.acc-=SEND;
+    S.pkts.push({seq:S.seq++,age:0,stage:0,br:null,dropAt:null,dead:null,done:false,el:null});
+    S.sent++;
+  }
+  var due=S.timers.filter(function(x){return x.at<=S.t;}).sort(function(a,b){return a.at-b.at;});
+  if(due.length){S.timers=S.timers.filter(function(x){return x.at>S.t;});due.forEach(function(x){x.fn();});}
+  for(var i=0;i<S.pkts.length;i++)stepPkt(S.pkts[i],dt);
+  S.pkts=S.pkts.filter(function(pk){if(pk.done){if(pk.el)pk.el.remove();return false;}return true;});
+}
+
+/* ---------- rendering ---------- */
+function pos(pk){
+  var age=pk.dead!==null?pk.dead:Math.min(pk.age,4*HOP);
+  var h=Math.min(3,Math.floor(age/HOP)),f=(age-h*HOP)/HOP;
+  var mid=pk.br==='b'?'s3':'s2',nodes=['h1','s1',mid,'s4','h2'];
+  var a=N[nodes[h]],b=N[nodes[h+1]];
+  return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f];
+}
+function renderPkts(){
+  var g=$('pk'),ns='http://www.w3.org/2000/svg';
+  for(var i=0;i<S.pkts.length;i++){
+    var pk=S.pkts[i];
+    if(!pk.el){pk.el=document.createElementNS(ns,'circle');pk.el.setAttribute('r','3.4');g.appendChild(pk.el);}
+    var p=pos(pk);
+    pk.el.setAttribute('cx',p[0].toFixed(1));pk.el.setAttribute('cy',p[1].toFixed(1));
+    if(pk.dead!==null){
+      var k=Math.min(1,(pk.age-pk.dead)/350);
+      pk.el.setAttribute('fill','#ff6b6b');pk.el.setAttribute('r',(3.4+k*4).toFixed(1));pk.el.setAttribute('opacity',(1-k).toFixed(2));
+    }else{
+      pk.el.setAttribute('fill',pk.br==='b'?'#b79cff':'#4cc3ff');
+    }
+  }
+}
+
+function drawChart(){
+  if(!S.dirtyChart)return;S.dirtyChart=false;
+  var W=600,H=200,L=38,R=8,T=12,B=24,pw=W-L-R,ph=H-T-B,MAXB=30;
+  var ws=S.windows.slice(-MAXB),off=S.windows.length-ws.length,slot=pw/MAXB,bw=slot*0.66,s='';
+  [0,25,50,75,100].forEach(function(v){
+    var y=T+ph*(1-v/100);
+    s+='<line class="gl" x1="'+L+'" x2="'+(W-R)+'" y1="'+y+'" y2="'+y+'"/><text class="ax" x="'+(L-6)+'" y="'+(y+3)+'" text-anchor="end">'+v+'%</text>';
+  });
+  ws.forEach(function(w,i){
+    var x=L+i*slot+(slot-bw)/2,hg=Math.max(w.loss/100*ph,2),y=T+ph-hg;
+    var c=w.loss>THR?'bad':(w.loss>0?'warn':'ok');
+    s+='<rect class="bar '+c+'" x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hg.toFixed(1)+'" rx="2"><title>window '+w.a+'-'+w.b+': loss '+w.loss.toFixed(1)+'%</title></rect>';
+  });
+  var ty=T+ph*(1-THR/100);
+  s+='<line class="th" x1="'+L+'" x2="'+(W-R)+'" y1="'+ty+'" y2="'+ty+'"/><text class="thl" x="'+(W-R)+'" y="'+(ty-4)+'" text-anchor="end">alert threshold '+THR+'%</text>';
+  S.reroutes.forEach(function(r){
+    var i=r.win-off;
+    if(i>=0&&i<=MAXB){var x=L+i*slot;s+='<line class="rr" x1="'+x+'" x2="'+x+'" y1="'+T+'" y2="'+(T+ph)+'"/><text class="rrl" x="'+(x+4)+'" y="'+(T+10)+'">reroute</text>';}
+  });
+  if(ws.length){
+    s+='<text class="ax" x="'+L+'" y="'+(H-6)+'">window '+(off+1)+'</text><text class="ax" x="'+(W-R)+'" y="'+(H-6)+'" text-anchor="end">window '+(off+ws.length)+'</text>';
+  }else{
+    s+='<text class="ax" x="'+(L+pw/2)+'" y="'+(T+ph/2)+'" text-anchor="middle">waiting for the first window</text>';
+  }
+  $('chart').innerHTML=s;
+}
+
+function tblHtml(name,rows,flashRow,flashAt){
+  var live=performance.now()-flashAt<2000;
+  var h='<div class="ft"><div class="ftn">'+name+' <span>priority=10</span></div><table><tr><th>match</th><th>action</th><th class="n">pkts</th><th class="n">age</th></tr>';
+  rows.forEach(function(r,i){
+    var f=(i===flashRow&&live)?' class="flash"':'';
+    h+='<tr'+f+'><td>in_port="'+r[0]+'"</td><td>output:"'+r[1]+'"</td><td class="n">'+r[2]+'</td><td class="n">'+Math.floor((S.t-r[3])/1000)+'s</td></tr>';
+  });
+  return h+'</table></div>';
+}
+function renderFlows(){
+  var prim=S.path==='primary',c=S.cnt,sn=S.since;
+  var h='';
+  h+=tblHtml('s1',[['s1-eth1',prim?'s1-eth2':'s1-eth3',c.s1,sn.s1],['s1-eth2','s1-eth1',0,0],['s1-eth3','s1-eth1',0,0]],0,S.flash.s1);
+  h+=tblHtml('s2',[['s2-eth1','s2-eth2',c.s2,0],['s2-eth2','s2-eth1',0,0]],-1,0);
+  h+=tblHtml('s3',[['s3-eth1','s3-eth2',c.s3,0],['s3-eth2','s3-eth1',0,0]],-1,0);
+  h+=tblHtml('s4',[['s4-eth1','s4-eth3',c.s4p,0],['s4-eth2','s4-eth3',c.s4b,0],['s4-eth3',prim?'s4-eth1':'s4-eth2',0,sn.s4]],2,S.flash.s4);
+  $('flows').innerHTML=h;
+}
+function renderStats(){
+  $('tSent').textContent=S.sent;
+  $('tRecv').textContent=S.recv;
+  var tl=$('tLost');tl.textContent=S.lost;tl.className='v'+(S.lost>0?' bad':'');
+  var tot=S.recv+S.lost,ov=tot?S.lost/tot*100:0;
+  var to=$('tOver');to.textContent=ov.toFixed(1)+'%';to.className='v'+(ov>THR?' bad':(ov>0?' warn':''));
+  var lw=S.windows.length?S.windows[S.windows.length-1].loss:0;
+  var tw=$('tWin');tw.textContent=lw.toFixed(1)+'%';tw.className='v'+(lw>THR?' bad':(lw>0?' warn':' ok'));
+  $('tRer').textContent=S.reroutes.length;
+  var tf=$('tFail');
+  if(S.failover===null){tf.textContent='none';tf.className='v sm';}
+  else{tf.textContent=(S.failover/1000).toFixed(2)+' s';tf.className='v warn';}
+  var silent=S.t-S.lastRecv>400&&S.t>1000;
+  var rx=$('tRx');rx.textContent=silent?'silent':'receiving';rx.className='v sm '+(silent?'bad':'ok');
+}
+
+/* ---------- actions ---------- */
+function breakLink(){
+  S.down=true;S.faultAt=S.t;S.failover=null;
+  log('you','link s1 s2 down',true);
+  log('switch','s1: port s1-eth2 LINK_DOWN, PortStatus sent to controller');
+  at(150,function(){
+    log('controller','PortStatus received: s1 port 2 is down');
+    if(S.path==='primary')reroute('link s1-s2 down');
+    else log('controller','already on the backup path, nothing to do');
+  });
+  updateTopo();
+}
+function restoreLink(){
+  S.down=false;
+  log('you','link s1 s2 up',true);
+  log('switch','s1: port s1-eth2 LINK_UP');
+  at(150,function(){log('controller','PortStatus: link up. No failback, traffic stays on '+(S.path==='backup'?'the backup path':'the primary path'));});
+  updateTopo();
+}
+function lossOn(){
+  S.loss=0.3;S.faultAt=S.t;S.failover=null;
+  log('you','tc qdisc add dev s1-eth2 root netem loss 30%',true);
+  updateTopo();
+}
+function lossOff(){
+  S.loss=0;
+  log('you','tc qdisc del dev s1-eth2 root');
+  updateTopo();
+}
+function resetAll(){
+  init();
+  log('you','Reset: controller restarted, topology rebuilt, primary path active',true);
+  updateTopo();
+}
+
+/* ---------- main ---------- */
+buildTopo();init();updateTopo();
+log('controller','switches s1-s4 connected, primary path flows installed (s1 eth1 to eth2, s4 eth3 to eth1)');
+for(var i=0;i<260;i++)step(20);
+$('bBreak').addEventListener('click',breakLink);
+$('bRestore').addEventListener('click',restoreLink);
+$('bLoss').addEventListener('click',lossOn);
+$('bClear').addEventListener('click',lossOff);
+$('bReset').addEventListener('click',resetAll);
+$('bPause').addEventListener('click',function(){paused=!paused;this.textContent=paused?'Resume':'Pause';});
+$('selThr').addEventListener('change',function(){THR=parseInt(this.value,10);S.dirtyChart=true;});
+$('selSpd').addEventListener('change',function(){speed=parseFloat(this.value);});
+
+var last=performance.now(),lastUI=0;
+function frame(now){
+  var real=Math.min(now-last,100);last=now;
+  if(!paused){
+    var sim=real*speed;
+    while(sim>0){var d=Math.min(sim,20);step(d);sim-=d;}
+  }
+  renderPkts();
+  if(now-lastUI>150){lastUI=now;renderStats();renderFlows();renderLog();drawChart();}
+  requestAnimationFrame(frame);
+}
+renderStats();renderFlows();renderLog();drawChart();renderPkts();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

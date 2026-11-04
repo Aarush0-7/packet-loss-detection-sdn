@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Packet Loss Detection &amp; Recovery using SDN</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0f141c; --panel:#18202c; --line:#2a3546; --text:#e6edf3; --muted:#8b98a9;
+          --green:#2ecc71; --red:#ff5c5c; --orange:#ffb020; --blue:#4da3ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:Segoe UI, Arial, sans-serif; font-size:18px; }
+  header { padding:18px 28px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; }
+  h1 { margin:0; font-size:28px; }
+  .team { color:var(--muted); font-size:20px; }
+  main { padding:20px 28px; display:grid; gap:18px; grid-template-columns: 1.4fr 1fr; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 18px; }
+  .panel h2 { margin:0 0 12px; font-size:18px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }
+  .cards { grid-column:1 / -1; display:grid; grid-template-columns:repeat(5, 1fr); gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 18px; }
+  .card .label { color:var(--muted); font-size:15px; }
+  .card .value { font-size:34px; font-weight:700; margin-top:4px; }
+  .buttons { grid-column:1 / -1; display:flex; gap:12px; flex-wrap:wrap; }
+  button { font-size:18px; padding:12px 20px; border-radius:8px; border:none; cursor:pointer; color:#0f141c; font-weight:600; }
+  button:active { transform:scale(0.97); }
+  .b-red { background:var(--red); } .b-green { background:var(--green); }
+  .b-orange { background:var(--orange); } .b-blue { background:var(--blue); }
+  .status { color:var(--muted); align-self:center; margin-left:auto; }
+  svg text { fill:var(--text); font-size:16px; text-anchor:middle; dominant-baseline:middle; }
+  svg .port { fill:var(--muted); font-size:13px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  .flows { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .changed { color:var(--green); font-weight:700; }
+  #events { max-height:240px; overflow-y:auto; }
+  #missing { color:var(--orange); font-family:Consolas, monospace; font-size:15px; word-break:break-all; margin-top:8px; }
+  .wide { grid-column:1 / -1; }
+  @media (max-width: 1000px) { main { grid-template-columns:1fr; } .cards { grid-template-columns:repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Packet Loss Detection &amp; Recovery using SDN</h1>
+  <div class="team">Team 8, Section A</div>
+</header>
+<main>
+  <div class="cards">
+    <div class="card"><div class="label">Packets received</div><div class="value" id="received">0</div></div>
+    <div class="card"><div class="label">Packets lost</div><div class="value" id="lost">0</div></div>
+    <div class="card"><div class="label">Overall loss</div><div class="value" id="loss">0%</div></div>
+    <div class="card"><div class="label">Current path</div><div class="value" id="pathname">-</div></div>
+    <div class="card"><div class="label">Reroutes</div><div class="value" id="reroutes">0</div></div>
+  </div>
+
+  <div class="buttons">
+    <button class="b-red" onclick="act('link_down')">Break primary link</button>
+    <button class="b-green" onclick="act('link_up')">Restore link</button>
+    <button class="b-orange" onclick="act('loss_on')">Inject 30% loss</button>
+    <button class="b-green" onclick="act('loss_off')">Remove loss</button>
+    <button class="b-blue" onclick="act('reset')">Reset to primary</button>
+    <div class="status" id="status">connecting...</div>
+  </div>
+
+  <div class="panel">
+    <h2>Topology</h2>
+    <svg viewBox="0 0 800 400" width="100%">
+      <line id="l-h1-s1" x1="70" y1="200" x2="210" y2="200"/>
+      <line id="l-s1-s2" x1="210" y1="200" x2="400" y2="80"/>
+      <line id="l-s1-s3" x1="210" y1="200" x2="400" y2="320"/>
+      <line id="l-s2-s4" x1="400" y1="80" x2="590" y2="200"/>
+      <line id="l-s3-s4" x1="400" y1="320" x2="590" y2="200"/>
+      <line id="l-s4-h2" x1="590" y1="200" x2="730" y2="200"/>
+      <text id="losstag" x="290" y="115" style="fill:var(--orange);font-weight:700" visibility="hidden">30% loss</text>
+      <text id="downtag" x="290" y="115" style="fill:var(--red);font-weight:700" visibility="hidden">LINK DOWN</text>
+      <text class="port" x="248" y="163">2</text><text class="port" x="248" y="240">3</text>
+      <text class="port" x="170" y="185">1</text><text class="port" x="368" y="82">1</text>
+      <text class="port" x="432" y="82">2</text><text class="port" x="368" y="318">1</text>
+      <text class="port" x="432" y="318">2</text><text class="port" x="552" y="163">1</text>
+      <text class="port" x="552" y="240">2</text><text class="port" x="630" y="185">3</text>
+      <g id="nodes"></g>
+      <text x="400" y="30" style="fill:var(--muted)">primary</text>
+      <text x="400" y="375" style="fill:var(--muted)">backup</text>
+    </svg>
+  </div>
+
+  <div class="panel">
+    <h2>Loss % per window (50 packets)</h2>
+    <canvas id="chart" height="220"></canvas>
+    <div id="missing"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Flow tables</h2>
+    <div class="flows">
+      <div><b>s1</b><table id="flows-s1"></table></div>
+      <div><b>s4</b><table id="flows-s4"></table></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Reroute events</h2>
+    <div id="events"><table><tbody id="eventrows"></tbody></table></div>
+  </div>
+</main>
+
+<script>
+const NODES = { h1:[70,200,'host'], s1:[210,200,'sw'], s2:[400,80,'sw'], s3:[400,320,'sw'], s4:[590,200,'sw'], h2:[730,200,'host'] };
+const LINKS = ['h1-s1','s1-s2','s1-s3','s2-s4','s3-s4','s4-h2'];
+let chart = null;
+
+function drawNodes(connected) {
+  let html = '';
+  for (const [name, [x, y, kind]] of Object.entries(NODES)) {
+    const on = kind === 'host' || connected.includes(name);
+    const fill = kind === 'host' ? '#2b3a55' : (on ? '#1f4d3a' : '#3a2a2a');
+    const stroke = kind === 'host' ? '#4da3ff' : (on ? '#2ecc71' : '#ff5c5c');
+    if (kind === 'host') html += `<rect x="${x-32}" y="${y-22}" width="64" height="44" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`;
+    else html += `<circle cx="${x}" cy="${y}" r="30" fill="${fill}" stroke="${stroke}" stroke-width="3"/>`;
+    html += `<text x="${x}" y="${y}">${name}</text>`;
+  }
+  document.getElementById('nodes').innerHTML = html;
+}
+
+function drawLinks(path, linkUp, lossOn) {
+  const active = new Set();
+  for (let i = 0; i < path.length - 1; i++) active.add([path[i], path[i+1]].sort().join('-'));
+  for (const l of LINKS) {
+    const el = document.getElementById('l-' + l);
+    let color = '#3a4659', width = 4, dash = '';
+    if (active.has(l)) { color = '#2ecc71'; width = 8; }
+    if (l === 's1-s2' && !linkUp) { color = '#ff5c5c'; width = 5; dash = '12 10'; }
+    el.setAttribute('stroke', color);
+    el.setAttribute('stroke-width', width);
+    el.setAttribute('stroke-dasharray', dash);
+  }
+  document.getElementById('downtag').setAttribute('visibility', linkUp ? 'hidden' : 'visible');
+  document.getElementById('losstag').setAttribute('visibility', linkUp && lossOn ? 'visible' : 'hidden');
+}
+
+function flowTable(id, rows, watchPort) {
+  let html = '<tr><th>in_port</th><th>output</th><th>packets</th></tr>';
+  for (const r of rows) {
+    const cls = r.in_port === watchPort ? ' class="changed"' : '';
+    html += `<tr${cls}><td>${r.in_port}</td><td>output:${r.output}</td><td>${r.packets}</td></tr>`;
+  }
+  document.getElementById(id).innerHTML = html;
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [state, stats, flows] = await Promise.all([getJSON('/api/state'), getJSON('/api/stats'), getJSON('/api/flows')]);
+    const path = state.path || [];
+    const events = state.events || [];
+    drawNodes(state.switches || []);
+    drawLinks(path, state.link_up, state.loss_on);
+
+    document.getElementById('received').textContent = stats.received || 0;
+    document.getElementById('lost').textContent = stats.lost || 0;
+    document.getElementById('loss').textContent = (stats.loss_pct || 0) + '%';
+    const pn = document.getElementById('pathname');
+    pn.textContent = state.path_name || '-';
+    pn.style.color = state.path_name === 'backup' ? 'var(--orange)' : 'var(--green)';
+    document.getElementById('reroutes').textContent = events.filter(e => e.reason !== 'manual reset').length;
+    document.getElementById('missing').textContent = stats.missing && stats.missing.length ? 'Recent missing seq: ' + stats.missing.join(', ') : '';
+
+    let rows = '';
+    for (const e of events.slice().reverse())
+      rows += `<tr><td>${e.time}</td><td>${e.reason}</td><td>${e.old} &rarr; ${e.new}</td></tr>`;
+    document.getElementById('eventrows').innerHTML = rows || '<tr><td style="color:var(--muted)">No reroutes yet</td></tr>';
+
+    flowTable('flows-s1', flows.s1 || [], 1);
+    flowTable('flows-s4', flows.s4 || [], 3);
+
+    if (chart) {
+      const w = stats.windows || [];
+      chart.data.labels = w.map((_, i) => i + 1);
+      chart.data.datasets[0].data = w;
+      chart.update('none');
+    }
+    document.getElementById('status').textContent = state.controller_alive
+      ? 'controller online · updated ' + new Date().toLocaleTimeString()
+      : 'controller offline';
+  } catch (err) {
+    document.getElementById('status').textContent = 'dashboard offline';
+  }
+}
+
+async function act(name) {
+  document.getElementById('status').textContent = name + '...';
+  await fetch('/api/' + name, { method: 'POST' });
+  refresh();
+}
+
+if (window.Chart) {
+  Chart.defaults.color = '#8b98a9';
+  Chart.defaults.font.size = 15;
+  chart = new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ label: 'loss %', data: [], borderColor: '#ffb020', backgroundColor: 'rgba(255,176,32,0.15)', fill: true, tension: 0.2, pointRadius: 3 }] },
+    options: { animation: false, scales: { y: { min: 0, max: 100, grid: { color: '#2a3546' } }, x: { grid: { color: '#2a3546' } } },
+               plugins: { legend: { display: false } } }
+  });
+}
+drawNodes([]);
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
